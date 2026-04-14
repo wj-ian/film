@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>16:9 视频周边特征扩展工具</title>
+    <style>
+        :root { --primary: #007AFF; --bg: #F2F2F7; --text: #1C1C1E; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); padding: 16px; margin: 0; }
+        .container { background: #FFF; padding: 20px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); }
+        h2 { font-size: 1.1rem; margin-top: 0; border-bottom: 1px solid #E5E5EA; padding-bottom: 10px; }
+        .control-group { margin-bottom: 16px; }
+        label { display: block; font-weight: 600; margin-bottom: 6px; font-size: 0.9rem; }
+        input[type="file"], input[type="range"] { width: 100%; box-sizing: border-box; }
+        .slider-container { display: flex; align-items: center; justify-content: space-between; font-size: 0.85rem; color: #8E8E93;}
+        button, .btn-download { display: block; width: 100%; background: var(--primary); color: #FFF; border: none; padding: 14px; border-radius: 8px; font-size: 1rem; font-weight: 600; text-align: center; text-decoration: none; margin-top: 10px; cursor: pointer; transition: opacity 0.2s; }
+        button:disabled { background: #A1C6EA; }
+        .btn-download { background: #34C759; display: none; }
+        canvas { width: 100%; border-radius: 8px; background: #000; margin-top: 15px; display: none; aspect-ratio: 16/9; }
+        video { display: none; }
+        #statusLog { margin-top: 12px; font-size: 0.8rem; color: #8E8E93; text-align: center; font-family: monospace; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>特征扩展与 16:9 转换矩阵</h2>
+    
+    <div class="control-group">
+        <label for="videoInput">1. 载入原始数据源 (Video)</label>
+        <input type="file" id="videoInput" accept="video/*">
+    </div>
+
+    <div class="control-group">
+        <label>2. 周边特征扩散半径 (Blur Radius)</label>
+        <input type="range" id="blurRadius" min="10" max="100" value="40">
+        <div class="slider-container">
+            <span>低扩散 (清晰)</span><span>高扩散 (抽象)</span>
+        </div>
+    </div>
+
+    <button id="processBtn" disabled>执行逐帧计算与编码</button>
+    <div id="statusLog">系统待机...</div>
+
+    <video id="sourceNode" muted playsinline></video>
+    <canvas id="renderContext"></canvas>
+    <a id="downloadLink" class="btn-download">提取编译后的视频</a>
+</div>
+
+<script>
+    const input = document.getElementById('videoInput');
+    const blurSlider = document.getElementById('blurRadius');
+    const processBtn = document.getElementById('processBtn');
+    const statusLog = document.getElementById('statusLog');
+    const sourceNode = document.getElementById('sourceNode');
+    const canvas = document.getElementById('renderContext');
+    const downloadLink = document.getElementById('downloadLink');
+
+    let mediaRecorder;
+    let frameChunks = [];
+    let rafId;
+
+    // 监听文件系统输入
+    input.addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        
+        sourceNode.src = URL.createObjectURL(file);
+        statusLog.innerText = "解码源文件元数据...";
+        
+        sourceNode.onloadedmetadata = () => {
+            statusLog.innerText = `向量参数解析完毕: ${sourceNode.videoWidth}x${sourceNode.videoHeight}`;
+            processBtn.disabled = false;
+        };
+    });
+
+    processBtn.addEventListener('click', async () => {
+        if (!sourceNode.src) return;
+        
+        // UI 状态阻断
+        processBtn.disabled = true;
+        downloadLink.style.display = 'none';
+        canvas.style.display = 'block';
+        frameChunks = [];
+
+        // 设定渲染目标分辨率 (基准 720p 以满足 iOS VRAM 阈值)
+        const outputW = 1280;
+        const outputH = 720;
+        canvas.width = outputW;
+        canvas.height = outputH;
+        
+        const ctx = canvas.getContext('2d', { alpha: false }); // 优化渲染性能
+        const targetAspect = outputW / outputH;
+        const sourceAspect = sourceNode.videoWidth / sourceNode.videoHeight;
+
+        // 初始化媒体流封装器
+        const stream = canvas.captureStream(30); 
+        // iOS Safari 优先支持 mp4 容器
+        let codec = 'video/mp4';
+        if (!MediaRecorder.isTypeSupported(codec)) {
+            codec = 'video/webm'; 
+        }
+        
+        try {
+            mediaRecorder = new MediaRecorder(stream, { mimeType: codec, videoBitsPerSecond: 3000000 });
+        } catch (err) {
+            statusLog.innerText = "异常：当前 WebKit 内核不支持指定编码。";
+            return;
+        }
+
+        mediaRecorder.ondataavailable = (e) => {
+            if (e.data.size > 0) frameChunks.push(e.data);
+        };
+
+        mediaRecorder.onstop = () => {
+            cancelAnimationFrame(rafId);
+            const blob = new Blob(frameChunks, { type: codec });
+            downloadLink.href = URL.createObjectURL(blob);
+            downloadLink.download = `expanded_16_9.${codec.split('/')[1]}`;
+            downloadLink.style.display = 'block';
+            statusLog.innerText = "计算矩阵闭合，流媒体封装完成。";
+            processBtn.disabled = false;
+        };
+
+        // 核心渲染循环：双层缓冲绘制
+        function renderPipeline() {
+            if (sourceNode.paused || sourceNode.ended) return;
+
+            // 第一层：背景扩图与高斯过滤计算
+            ctx.globalAlpha = 1.0;
+            const blurVal = blurSlider.value;
+            ctx.filter = `blur(${blurVal}px) brightness(0.8)`;
+            
+            // 计算背景填充(Cover)比例
+            let bgW, bgH;
+            if (sourceAspect > targetAspect) {
+                bgH = outputH; bgW = outputH * sourceAspect;
+            } else {
+                bgW = outputW; bgH = outputW / sourceAspect;
+            }
+            const bgX = (outputW - bgW) / 2;
+            const bgY = (outputH - bgH) / 2;
+            
+            // 绘制扩展层
+            ctx.drawImage(sourceNode, bgX, bgY, bgW, bgH);
+
+            // 第二层：主体前景覆盖
+            ctx.filter = 'none'; 
+            
+            // 计算前景限制(Contain)比例
+            let fgW, fgH;
+            if (sourceAspect > targetAspect) {
+                fgW = outputW; fgH = outputW / sourceAspect;
+            } else {
+                fgH = outputH; fgW = outputH * sourceAspect;
+            }
+            const fgX = (outputW - fgW) / 2;
+            const fgY = (outputH - fgH) / 2;
+
+            // 投射原始帧以保留主体清晰度
+            ctx.drawImage(sourceNode, fgX, fgY, fgW, fgH);
+
+            rafId = requestAnimationFrame(renderPipeline);
+        }
+
+        statusLog.innerText = "渲染进程挂载中，为防止系统休眠中断计算，请勿锁屏...";
+        
+        sourceNode.currentTime = 0;
+        await sourceNode.play();
+        mediaRecorder.start();
+        renderPipeline();
+
+        sourceNode.onended = () => mediaRecorder.stop();
+    });
+</script>
+
+</body>
+</html>
