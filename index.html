@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>AI Multi-Axis Guitarist Synthesis</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { background: #000; color: #fff; font-family: -apple-system; touch-action: none; }
+        .canvas-container { position: relative; width: 100%; max-width: 360px; aspect-ratio: 9/16; background: #000; border-radius: 24px; overflow: hidden; margin: 0 auto; border: 2px solid #333; }
+        #renderCanvas { width: 100%; height: 100%; }
+        .control-panel { background: rgba(15, 15, 20, 0.95); backdrop-filter: blur(25px); border-top: 1px solid #333; }
+        input[type=range] { width: 100%; accent-color: #3b82f6; height: 5px; }
+        .axis-label { font-size: 9px; color: #666; width: 25px; }
+        .section-title { font-size: 11px; font-weight: bold; margin-bottom: 8px; display: flex; justify-content: space-between; }
+    </style>
+</head>
+<body class="flex flex-col min-h-screen">
+
+    <div class="p-3 flex-none">
+        <div class="canvas-container shadow-2xl">
+            <canvas id="renderCanvas"></canvas>
+            <div id="recIndicator" class="absolute top-4 left-4 hidden bg-red-600 px-2 py-1 rounded text-[10px] font-bold animate-pulse">RECORDING AUDIO + VIDEO</div>
+        </div>
+    </div>
+
+    <main class="control-panel flex-grow p-4 space-y-4 rounded-t-[2rem] overflow-y-auto">
+        
+        <div class="flex gap-2 mb-2">
+            <button onclick="document.getElementById('imgIn').click()" class="flex-1 bg-zinc-800 py-2 rounded-lg text-xs">载入人物图</button>
+            <button onclick="document.getElementById('audIn').click()" class="flex-1 bg-zinc-800 py-2 rounded-lg text-xs">载入MP3</button>
+            <input type="file" id="imgIn" accept="image/*" class="hidden">
+            <input type="file" id="audIn" accept="audio/mpeg" class="hidden">
+        </div>
+
+        <div class="bg-white/5 p-3 rounded-xl border border-white/5">
+            <div class="section-title text-blue-400"><span>LIP SYNC (嘴部)</span><span id="v_lip">50, 45</span></div>
+            <div class="flex gap-4">
+                <div class="flex-1 flex items-center gap-2"><span class="axis-label">X</span><input type="range" id="mX" value="50"></div>
+                <div class="flex-1 flex items-center gap-2"><span class="axis-label">Y</span><input type="range" id="mY" value="45"></div>
+            </div>
+        </div>
+
+        <div class="bg-white/5 p-3 rounded-xl border border-white/5">
+            <div class="section-title text-green-400"><span>LEFT HAND (左手/按弦)</span><span id="v_lh">30, 75</span></div>
+            <div class="flex gap-4">
+                <div class="flex-1 flex items-center gap-2"><span class="axis-label">X</span><input type="range" id="lX" value="30"></div>
+                <div class="flex-1 flex items-center gap-2"><span class="axis-label">Y</span><input type="range" id="lY" value="75"></div>
+            </div>
+        </div>
+
+        <div class="bg-white/5 p-3 rounded-xl border border-white/5">
+            <div class="section-title text-purple-400"><span>RIGHT HAND (右手/拨弦)</span><span id="v_rh">70, 75</span></div>
+            <div class="flex gap-4">
+                <div class="flex-1 flex items-center gap-2"><span class="axis-label">X</span><input type="range" id="rX" value="70"></div>
+                <div class="flex-1 flex items-center gap-2"><span class="axis-label">Y</span><input type="range" id="rY" value="75"></div>
+            </div>
+        </div>
+
+        <div class="pt-2">
+            <button id="startBtn" class="w-full bg-blue-600 h-12 rounded-xl font-bold">开始生成并导出</button>
+            <a id="saveBtn" class="hidden w-full bg-green-600 h-12 rounded-xl font-bold flex items-center justify-center mt-2">点击下载高清视频</a>
+        </div>
+    </main>
+
+    <script>
+        const canvas = document.getElementById('renderCanvas');
+        const ctx = canvas.getContext('2d');
+        const ids = ['mX','mY','lX','lY','rX','rY'];
+        const controls = {};
+        ids.forEach(id => {
+            controls[id] = document.getElementById(id);
+            controls[id].oninput = () => renderPreview();
+        });
+
+        let audioCtx, analyser, dataArray, source, recorder, chunks = [];
+        let mainImg = new Image();
+        canvas.width = 720; canvas.height = 1280;
+
+        document.getElementById('imgIn').onchange = e => {
+            const reader = new FileReader();
+            reader.onload = ev => { mainImg.src = ev.target.result; };
+            reader.readAsDataURL(e.target.files[0]);
+            mainImg.onload = () => renderPreview();
+        };
+
+        function renderPreview() {
+            ctx.clearRect(0,0,canvas.width,canvas.height);
+            if(mainImg.src) ctx.drawImage(mainImg,0,0,canvas.width,canvas.height);
+            
+            const drawAnchor = (x, y, color, label) => {
+                const px = canvas.width * (x/100);
+                const py = canvas.height * (y/100);
+                ctx.strokeStyle = color; ctx.lineWidth = 3;
+                ctx.strokeRect(px-20, py-20, 40, 40);
+                ctx.fillStyle = color; ctx.font = "24px Arial";
+                ctx.fillText(label, px-20, py-30);
+            };
+            drawAnchor(controls.mX.value, controls.mY.value, "#3b82f6", "嘴");
+            drawAnchor(controls.lX.value, controls.lY.value, "#10b981", "左");
+            drawAnchor(controls.rX.value, controls.rY.value, "#a855f7", "右");
+        }
+
+        async function startEngine() {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            const buffer = await (await document.getElementById('audIn').files[0].arrayBuffer());
+            const audioBuffer = await audioCtx.decodeAudioData(buffer);
+            const dest = audioCtx.createMediaStreamDestination();
+            source = audioCtx.createBufferSource(); source.buffer = audioBuffer;
+            analyser = audioCtx.createAnalyser(); analyser.fftSize = 256;
+            source.connect(analyser); analyser.connect(audioCtx.destination); source.connect(dest);
+
+            const combinedStream = new MediaStream([
+                ...canvas.captureStream(30).getVideoTracks(),
+                ...dest.stream.getAudioTracks()
+            ]);
+
+            recorder = new MediaRecorder(combinedStream, { mimeType: 'video/mp4' });
+            chunks = [];
+            recorder.ondataavailable = e => chunks.push(e.data);
+            recorder.onstop = () => {
+                const blob = new Blob(chunks, { type: 'video/mp4' });
+                const url = URL.createObjectURL(blob);
+                const a = document.getElementById('saveBtn');
+                a.href = url; a.download = "ai_performance.mp4";
+                a.classList.remove('hidden');
+                document.getElementById('startBtn').innerText = "重新渲染";
+            };
+
+            source.start(0); recorder.start();
+            document.getElementById('recIndicator').classList.remove('hidden');
+            dataArray = new Uint8Array(analyser.frequencyBinCount);
+            
+            function loop() {
+                if (recorder.state === 'inactive') return;
+                analyser.getByteFrequencyData(dataArray);
+                ctx.clearRect(0,0,canvas.width,canvas.height);
+                ctx.drawImage(mainImg,0,0,canvas.width,canvas.height);
+
+                const bass = dataArray[2] || 0;     // 低频驱动左手
+                const mid = dataArray[10] || 0;     // 中频驱动右手
+                const treble = dataArray[25] || 0;  // 高频驱动口型
+
+                // 1. 嘴部动态 (Lip Sync)
+                const mx = canvas.width * (controls.mX.value/100);
+                const my = canvas.height * (controls.mY.value/100);
+                ctx.fillStyle = "rgba(0,0,0,0.85)";
+                ctx.beginPath();
+                ctx.ellipse(mx, my, 25, 8 + (treble/255)*50, 0, 0, Math.PI*2);
+                ctx.fill();
+
+                // 2. 左手动态 (按弦：基于低音频率产生位移)
+                const lx = canvas.width * (controls.lX.value/100) + (bass/10);
+                const ly = canvas.height * (controls.lY.value/100) + Math.sin(Date.now()*0.01)*5;
+                ctx.fillStyle = "#10b981"; ctx.shadowBlur = 15; ctx.shadowColor = "#10b981";
+                for(let i=0; i<4; i++) {
+                    ctx.beginPath(); ctx.arc(lx + i*15, ly + (bass/20), 10, 0, Math.PI*2); ctx.fill();
+                }
+
+                // 3. 右手动态 (拨弦：基于中频节奏产生上下振动)
+                const rx = canvas.width * (controls.rX.value/100);
+                const ry = canvas.height * (controls.rY.value/100) + (mid/5);
+                ctx.fillStyle = "#a855f7"; ctx.shadowBlur = 15; ctx.shadowColor = "#a855f7";
+                ctx.beginPath(); ctx.arc(rx, ry, 18, 0, Math.PI*2); ctx.fill();
+                
+                ctx.shadowBlur = 0;
+                requestAnimationFrame(loop);
+            }
+            loop();
+            source.onended = () => { recorder.stop(); audioCtx.close(); };
+        }
+
+        document.getElementById('startBtn').onclick = () => {
+            startEngine().catch(e => alert("渲染初始化失败，请确保上传了 MP3 和图片。"));
+        };
+    </script>
+</body>
+</html>
