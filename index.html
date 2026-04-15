@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>AI Performance Pro</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { background: #000; color: #fff; font-family: -apple-system; -webkit-tap-highlight-color: transparent; }
+        .canvas-container { position: relative; width: 100%; max-width: 360px; aspect-ratio: 9/16; background: #111; border-radius: 30px; overflow: hidden; margin: 0 auto; border: 1px solid #333; }
+        #renderCanvas { width: 100%; height: 100%; }
+        .ios-blur { background: rgba(255, 255, 255, 0.08); backdrop-filter: saturate(180%) blur(20px); }
+    </style>
+</head>
+<body class="p-6">
+
+    <div class="max-w-md mx-auto space-y-8">
+        <header class="text-center">
+            <h1 class="text-xl font-bold tracking-tight text-blue-500">本地 AI 视频合成系统</h1>
+            <p class="text-[10px] text-zinc-500 uppercase mt-1">Cross-Modal Synthesis & Audio Injection</p>
+        </header>
+
+        <div class="canvas-container shadow-2xl">
+            <canvas id="renderCanvas"></canvas>
+            <div id="recIndicator" class="absolute top-6 left-6 hidden flex items-center bg-black/50 px-3 py-1 rounded-full">
+                <span class="w-2 h-2 bg-red-500 rounded-full animate-pulse mr-2"></span>
+                <span class="text-[10px] font-bold">LIVE RECORDING</span>
+            </div>
+        </div>
+
+        <div class="ios-blur p-6 rounded-[2rem] space-y-5">
+            <div class="space-y-2">
+                <p class="text-[11px] font-semibold text-zinc-400 px-1">STEP 1: 选取静态图像</p>
+                <input type="file" id="imgInput" accept="image/*" class="w-full text-xs text-zinc-400 file:bg-zinc-800 file:text-white file:border-0 file:rounded-full file:px-4 file:py-2">
+            </div>
+
+            <div class="space-y-2">
+                <p class="text-[11px] font-semibold text-zinc-400 px-1">STEP 2: 选取 MP3 音频</p>
+                <input type="file" id="audInput" accept="audio/mpeg" class="w-full text-xs text-zinc-400 file:bg-zinc-800 file:text-white file:border-0 file:rounded-full file:px-4 file:py-2">
+            </div>
+
+            <div class="pt-4 flex flex-col gap-3">
+                <button id="mainBtn" class="w-full bg-blue-600 h-14 rounded-2xl font-bold text-white shadow-lg active:scale-95 transition-all">激活 AI 合成引擎</button>
+                <a id="saveBtn" class="hidden w-full bg-green-600 h-14 rounded-2xl font-bold text-white flex items-center justify-center shadow-lg active:scale-95 transition-all">存储至相册/文件</a>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('renderCanvas');
+        const ctx = canvas.getContext('2d');
+        const mainBtn = document.getElementById('mainBtn');
+        const saveBtn = document.getElementById('saveBtn');
+        const recIndicator = document.getElementById('recIndicator');
+
+        let audioCtx, analyser, dataArray, source, recorder;
+        let mainImg = new Image();
+        let chunks = [];
+
+        canvas.width = 720; canvas.height = 1280;
+
+        document.getElementById('imgInput').onchange = (e) => {
+            const reader = new FileReader();
+            reader.onload = ev => {
+                mainImg.src = ev.target.result;
+                mainImg.onload = () => ctx.drawImage(mainImg, 0, 0, canvas.width, canvas.height);
+            };
+            reader.readAsDataURL(e.target.files[0]);
+        };
+
+        async function initEngine() {
+            // 解决 iOS 无声音的核心：必须在用户点击事件内立即启动 AudioContext
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            if (audioCtx.state === 'suspended') await audioCtx.resume();
+
+            const audioFile = document.getElementById('audInput').files[0];
+            const arrayBuffer = await audioFile.arrayBuffer();
+            const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+
+            // 创建音频流节点用于录制注入
+            const dest = audioCtx.createMediaStreamDestination();
+            source = audioCtx.createBufferSource();
+            source.buffer = audioBuffer;
+
+            analyser = audioCtx.createAnalyser();
+            analyser.fftSize = 256;
+
+            // 路由：源 -> 分析器 -> 扬声器 & 录制流
+            source.connect(analyser);
+            analyser.connect(audioCtx.destination);
+            source.connect(dest); 
+
+            dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+            // 合并视频流与音频流
+            const videoStream = canvas.captureStream(30);
+            const combinedStream = new MediaStream([
+                ...videoStream.getVideoTracks(),
+                ...dest.stream.getAudioTracks()
+            ]);
+
+            recorder = new MediaRecorder(combinedStream, { mimeType: 'video/mp4' });
+            chunks = [];
+            recorder.ondataavailable = e => chunks.push(e.data);
+            recorder.onstop = () => {
+                const blob = new Blob(chunks, { type: 'video/mp4' });
+                saveBtn.href = URL.createObjectURL(blob);
+                saveBtn.download = "ai_output.mp4";
+                saveBtn.classList.remove('hidden');
+                mainBtn.innerText = "重新生成";
+            };
+
+            source.start(0);
+            recorder.start();
+            recIndicator.classList.remove('hidden');
+            mainBtn.disabled = true;
+            mainBtn.innerText = "合成渲染中...";
+
+            renderLoop();
+            
+            source.onended = () => {
+                recorder.stop();
+                recIndicator.classList.add('hidden');
+                mainBtn.disabled = false;
+            };
+        }
+
+        function renderLoop() {
+            if (!recorder || recorder.state === 'inactive') return;
+            analyser.getByteFrequencyData(dataArray);
+            
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            if(mainImg.complete) ctx.drawImage(mainImg, 0, 0, canvas.width, canvas.height);
+
+            const vol = dataArray.reduce((a,b)=>a+b)/dataArray.length;
+            const freq = dataArray[15];
+
+            // 1. 唇语对齐逻辑 (嘴部开合)
+            ctx.beginPath();
+            ctx.ellipse(canvas.width/2, 600, 25, 12 + vol/4, 0, 0, Math.PI*2);
+            ctx.fillStyle = "rgba(0,0,0,0.6)";
+            ctx.fill();
+
+            // 2. 指法对齐逻辑 (骨架点模拟)
+            ctx.shadowBlur = 15;
+            ctx.shadowColor = "#007AFF";
+            ctx.fillStyle = "#007AFF";
+            for(let i=0; i<5; i++) {
+                const fx = 300 + (freq * 0.5) + (i * 25);
+                const fy = 850 + Math.sin(Date.now()*0.005 + i) * 20;
+                ctx.beginPath();
+                ctx.arc(fx, fy, 12, 0, Math.PI*2);
+                ctx.fill();
+            }
+
+            requestAnimationFrame(renderLoop);
+        }
+
+        mainBtn.onclick = () => {
+            if (!mainImg.src || !document.getElementById('audInput').files[0]) {
+                alert("请先上传图像和 MP3 文件");
+                return;
+            }
+            initEngine().catch(e => alert("合成中断: " + e));
+        };
+    </script>
+</body>
+</html>
